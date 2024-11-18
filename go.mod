@@ -1,4 +1,4 @@
-module github.com/kdudkov/goatak
+module github.com/manalsiddiqui/goatak
 
 go 1.22.2
 
