@@ -1,32 +1,16 @@
 ---
-# server address to connect to
-server_address: 137.184.101.250:8087:tcp
-# local port for web server
-web_port: 8080
-# gpsd address, usually localhost:2947
-gpsd: ""
-
-me:
-  # your callsign
-  callsign: TestUser
-  # your uid. If 'auto' uid is generated
-  uid: auto
-  # your unit type
-  type: a-f-G-U-C
-  # your team: one of (White, Yellow, Orange, Magenta, Red, Maroon, Purple, Dark Blue, Blue, Cyan, Teal, Green, Dark Green, Brown)
-  team: White
-  # your role: one of (HQ, Team Lead, Team Member, K9, Forward Observer, Sniper, Medic, RTO)
-  role: Team Member
-  lat: 0
-  lon: 0
-
-ssl:
-  cert: ""
-  # password for certificate file
-  password: atakatak
-  # login for cert enrollment. If not empty, client does cert enrollment
-  enroll_user: ""
-  # password for cert enrollment
-  enroll_password: ""
-  # if true, enrolled certificate is saved locally
-  save_cert: true
+  # server address to connect to
+  server_address: argustak.com:8089:ssl
+  # local port for web server
+  web_port: 8080
+  me:
+    callsign: goldencaledonia
+    uid: autocall
+    type: a-f-G-U-C
+    team: Blue
+    role: Team Member
+    lat: 45.5
+    lon: -75.6
+  ssl:
+    cert: GoTAK-client-cert.p12
+    password: AASCEND

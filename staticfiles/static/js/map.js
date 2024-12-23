@@ -120,685 +120,777 @@ class Unit {
     }
 }
 
-let app = new Vue({
-    el: '#app',
-    data: function () {
-        return {
-            map: null,
-            layers: null,
-            conn: null,
-            status: "",
-            units: new Map(),
-            messages: [],
-            seenMessages: new Set(),
-            ts: 0,
-            locked_unit_uid: '',
-            current_unit_uid: null,
-            config: null,
-            tools: new Map(),
-            me: null,
-            coords: null,
-            point_num: 1,
-            coord_format: "d",
-            form_unit: {},
-            types: null,
-            chatroom: "",
-            chat_uid: "",
-            chat_msg: "",
-        }
-    },
 
-    mounted() {
-        this.map = L.map('map');
-        this.map.setView([60, 30], 11);
 
-        L.control.scale({metric: true}).addTo(this.map);
-
-        this.getConfig();
-
-        let supportsWebSockets = 'WebSocket' in window || 'MozWebSocket' in window;
-
-        if (supportsWebSockets) {
-            this.connect();
-            // setInterval(this.fetchAllUnits, 60000);
-        }
-
-        this.renew();
-        setInterval(this.renew, 5000);
-        setInterval(this.sender, 1000);
-
-        this.map.on('click', this.mapClick);
-        this.map.on('mousemove', this.mouseMove);
-
-        this.formFromUnit(null);
-    },
-
-    computed: {
-        current_unit: function () {
-            return this.current_unit_uid ? this.current_unit_uid && this.getCurrentUnit() : null;
-        }
-    },
-
-    methods: {
-        getConfig: function () {
-            let vm = this;
-
-            fetch('/config')
-                .then(resp => resp.json())
-                .then(data => {
-                    vm.config = data;
-
-                    vm.map.setView([data.lat, data.lon], data.zoom);
-
-                    if (vm.config.callsign) {
-                        vm.me = L.marker([data.lat, data.lon]);
-                        vm.me.setIcon(L.icon({
-                            iconUrl: "/static/icons/self.png",
-                            iconAnchor: new L.Point(16, 16),
-                        }));
-                        vm.me.addTo(vm.map);
-
-                        fetch('/types')
-                            .then(resp => resp.json())
-                            .then(d => vm.types = d);
-                    }
-
-                    layers = L.control.layers({}, null, {hideSingleBase: true});
-                    layers.addTo(vm.map);
-
-                    let first = true;
-                    data.layers.forEach(function (i) {
-                        let opts = {
-                            minZoom: i.minZoom ?? 1,
-                            maxZoom: i.maxZoom ?? 20,
-                        }
-
-                        if (i.parts) {
-                            opts["subdomains"] = i.parts;
-                        }
-
-                        l = L.tileLayer(i.url, opts);
-
-                        layers.addBaseLayer(l, i.name);
-
-                        if (first) {
-                            first = false;
-                            l.addTo(vm.map);
-                        }
-                    });
-                });
-        },
-
-        connect: function () {
-            let url = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host + '/ws';
-            let vm = this;
-
-            this.fetchAllUnits();
-            this.fetchMessages();
-
-            this.conn = new WebSocket(url);
-
-            this.conn.onmessage = function (e) {
-                vm.processWS(JSON.parse(e.data));
-            };
-
-            this.conn.onopen = function (e) {
-                console.log("connected");
-                vm.status = "connected";
-            };
-
-            this.conn.onerror = function (e) {
-                console.log("error");
-                vm.status = "error";
-            };
-
-            this.conn.onclose = function (e) {
-                console.log("closed");
-                vm.status = "";
-                setTimeout(vm.connect, 3000);
-            };
-        },
-
-        fetchAllUnits: function () {
-            let vm = this;
-
-            fetch('/unit')
-                .then(resp => resp.json())
-                .then(vm.processUnits);
-        },
-
-        fetchMessages: function () {
-            let vm = this;
-
-            fetch('/message')
-                .then(resp => resp.json())
-                .then(d => vm.messages = d);
-        },
-
-        renew: function () {
-            if (!this.conn) {
-                this.fetchAllUnits();
-                this.fetchMessages();
-            }
-        },
-
-        sender: function () {
-            if (this.getTool("dp1")) {
-                let p = this.getTool("dp1").getLatLng();
-
-                const requestOptions = {
-                    method: "POST",
-                    headers: {"Content-Type": "application/json"},
-                    body: JSON.stringify({lat: p.lat, lon: p.lng, name: "DP1"})
-                };
-                fetch("/dp", requestOptions);
-            }
-        },
-
-        processUnits: function (data) {
-            let keys = new Set();
-
-            for (let u of data) {
-                keys.add(this.processUnit(u)?.uid);
-            }
-
-            for (const k of this.units.keys()) {
-                if (!keys.has(k)) {
-                    this.removeUnit(k);
-                }
-            }
-
-            this.ts += 1;
-        },
-
-        processUnit: function (u) {
-            if (!u) return;
-            let unit = this.units.get(u.uid);
-
-            if (!unit) {
-                unit = new Unit(this.map, u);
-                this.units.set(u.uid, unit);
-            } else {
-                unit.update(this.map, u)
-            }
-
-            if (this.locked_unit_uid === unit.uid) {
-                this.map.setView(unit.coords());
-            }
-
-            return unit;
-        },
-
-        processWS: function (u) {
-            if (u.type === "unit") {
-                this.processUnit(u.unit);
-            }
-
-            if (u.type === "delete") {
-                this.removeUnit(u.uid);
-            }
-
-            if (u.type === "chat") {
-                this.fetchMessages();
-            }
-        },
-
-        removeUnit: function (uid) {
-            if (!this.units.has(uid)) return;
-
-            let item = this.units.get(uid);
-            item.removeMarker(this.map)
-            this.units.delete(uid);
-
-            if (this.current_unit_uid === uid) {
-                this.setCurrentUnitUid(null, false);
-            }
-        },
-
-        setCurrentUnitUid: function (uid, follow) {
-            if (uid && this.units.has(uid)) {
-                this.current_unit_uid = uid;
-                let u = this.units.get(uid);
-                if (follow) this.mapToUnit(u);
-                this.formFromUnit(u);
-            } else {
-                this.current_unit_uid = null;
-                this.formFromUnit(null);
-            }
-        },
-
-        getCurrentUnit: function () {
-            if (!this.current_unit_uid || !this.units.has(this.current_unit_uid)) return null;
-            return this.units.get(this.current_unit_uid);
-        },
-
-        byCategory: function (s) {
-            let arr = Array.from(this.units.values()).filter(function (u) {
-                return u.unit.category === s
-            });
-            arr.sort(function (a, b) {
-                return a.compare(b);
-            });
-            return this.ts && arr;
-        },
-
-        mapToUnit: function (u) {
-            if (u && u.hasCoords()) {
-                this.map.setView(u.coords());
-            }
-        },
-
-        getImg: function (item, size) {
-            return getIconUri(item, size, false).uri;
-        },
-
-        milImg: function (item) {
-            return getMilIconUri(item, 24, false).uri;
-        },
-
-        dt: function (str) {
-            let d = new Date(Date.parse(str));
-            return ("0" + d.getDate()).slice(-2) + "-" + ("0" + (d.getMonth() + 1)).slice(-2) + "-" +
-                d.getFullYear() + " " + ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
-        },
-
-        sp: function (v) {
-            return (v * 3.6).toFixed(1);
-        },
-
-        modeIs: function (s) {
-            return document.getElementById(s).checked === true;
-        },
-
-        mouseMove: function (e) {
-            this.coords = e.latlng;
-        },
-
-        mapClick: function (e) {
-            if (this.modeIs("redx")) {
-                this.addOrMove("redx", e.latlng, "/static/icons/x.png")
-                return;
-            }
-            if (this.modeIs("dp1")) {
-                this.addOrMove("dp1", e.latlng, "/static/icons/spoi_icon.png")
-                return;
-            }
-            if (this.modeIs("point")) {
-                let uid = uuidv4();
-                let now = new Date();
-                let stale = new Date(now);
-                stale.setDate(stale.getDate() + 365);
-                let u = {
-                    uid: uid,
-                    category: "point",
-                    callsign: "point-" + this.point_num++,
-                    sidc: "",
-                    start_time: now,
-                    last_seen: now,
-                    stale_time: stale,
-                    type: "b-m-p-s-m",
-                    lat: e.latlng.lat,
-                    lon: e.latlng.lng,
-                    hae: 0,
-                    speed: 0,
-                    course: 0,
-                    status: "",
-                    text: "",
-                    parent_uid: "",
-                    parent_callsign: "",
-                    color: "#ff0000",
-                    local: true,
-                    send: false,
-                }
-                if (this.config && this.config.uid) {
-                    u.parent_uid = this.config.uid;
-                    u.parent_callsign = this.config.callsign;
-                }
-
-                let unit = new Unit(null, u);
-                unit.send();
-
-                this.setCurrentUnitUid(u.uid, true);
-            }
-            if (this.modeIs("me")) {
-                this.config.lat = e.latlng.lat;
-                this.config.lon = e.latlng.lng;
-                this.me.setLatLng(e.latlng);
-                const requestOptions = {
-                    method: "POST",
-                    headers: {"Content-Type": "application/json"},
-                    body: JSON.stringify({lat: e.latlng.lat, lon: e.latlng.lng})
-                };
-                fetch("/pos", requestOptions);
-            }
-        },
-
-        formFromUnit: function (u) {
-            if (!u) {
-                this.form_unit = {
-                    callsign: "",
-                    category: "",
-                    type: "",
-                    subtype: "",
-                    aff: "",
-                    text: "",
-                    send: false,
-                    root_sidc: null,
-                };
-            } else {
-                this.form_unit = {
-                    callsign: u.unit.callsign,
-                    category: u.unit.category,
-                    type: u.unit.type,
-                    subtype: "G",
-                    aff: "h",
-                    text: u.unit.text,
-                    send: u.unit.send,
-                    root_sidc: this.types,
-                };
-
-                if (u.unit.type.startsWith('a-')) {
-                    this.form_unit.type = 'b-m-p-s-m';
-                    this.form_unit.aff = u.unit.type.substring(2, 3);
-                    this.form_unit.subtype = u.unit.type.substring(4);
-                    this.form_unit.root_sidc = this.getRootSidc(u.unit.type.substring(4))
-                }
-            }
-        },
-
-        saveEditForm: function () {
-            let u = this.getCurrentUnit();
-            if (!u) return;
-
-            u.unit.callsign = this.form_unit.callsign;
-            u.unit.category = this.form_unit.category;
-            u.unit.send = this.form_unit.send;
-            u.unit.text = this.form_unit.text;
-
-            if (this.form_unit.category === "unit") {
-                u.unit.type = ["a", this.form_unit.aff, this.form_unit.subtype].join('-');
-                u.unit.sidc = this.sidcFromType(u.unit.type);
-            } else {
-                u.unit.type = this.form_unit.type;
-                u.unit.sidc = "";
-            }
-
-            u.redraw = true;
-            u.updateMarker(this.map);
-            u.send();
-        },
-
-        getRootSidc: function (s) {
-            let curr = this.types;
-
-            for (; ;) {
-                if (!curr?.next) {
-                    return null;
-                }
-
-                let found = false;
-                for (const k of curr.next) {
-                    if (k.code === s) {
-                        return curr;
-                    }
-
-                    if (s.startsWith(k.code)) {
-                        curr = k;
-                        found = true;
-                        break
-                    }
-                }
-                if (!found) {
-                    return null;
-                }
-            }
-        },
-
-        getSidc: function (s) {
-            let curr = this.types;
-
-            if (s === "") {
-                return curr;
-            }
-
-            for (; ;) {
-                if (!curr?.next) {
-                    return null;
-                }
-
-                for (const k of curr.next) {
-                    if (k.code === s) {
-                        return k;
-                    }
-
-                    if (s.startsWith(k.code)) {
-                        curr = k;
-                        break
-                    }
-                }
-            }
-        },
-
-        setFormRootSidc: function (s) {
-            let t = this.getSidc(s);
-            if (t?.next) {
-                this.form_unit.root_sidc = t;
-                this.form_unit.subtype = t.next[0].code;
-            } else {
-                this.form_unit.root_sidc = this.types;
-                this.form_unit.subtype = this.types.next[0].code;
-            }
-        },
-
-        removeTool: function (name) {
-            if (this.tools.has(name)) {
-                let p = this.tools.get(name);
-                this.map.removeLayer(p);
-                p.remove();
-                this.tools.delete(name);
-                this.ts++;
-            }
-        },
-
-        getTool: function (name) {
-            return this.tools.get(name);
-        },
-
-        addOrMove(name, coord, icon) {
-            if (this.tools.has(name)) {
-                this.tools.get(name).setLatLng(coord);
-            } else {
-                let p = new L.marker(coord).addTo(this.map);
-                if (icon) {
-                    p.setIcon(L.icon({
-                        iconUrl: icon,
-                        iconSize: [20, 20],
-                        iconAnchor: new L.Point(10, 10),
-                    }));
-                }
-                this.tools.set(name, p);
-            }
-            this.ts++;
-        },
-
-        printCoordsll: function (latlng) {
-            return this.printCoords(latlng.lat, latlng.lng);
-        },
-
-        printCoords: function (lat, lng) {
-            return lat.toFixed(6) + "," + lng.toFixed(6);
-        },
-
-        latlng: function (lat, lon) {
-            return L.latLng(lat, lon);
-        },
-
-        distBea: function (p1, p2) {
-            let toRadian = Math.PI / 180;
-            // haversine formula
-            // bearing
-            let y = Math.sin((p2.lng - p1.lng) * toRadian) * Math.cos(p2.lat * toRadian);
-            let x = Math.cos(p1.lat * toRadian) * Math.sin(p2.lat * toRadian) - Math.sin(p1.lat * toRadian) * Math.cos(p2.lat * toRadian) * Math.cos((p2.lng - p1.lng) * toRadian);
-            let brng = Math.atan2(y, x) * 180 / Math.PI;
-            brng += brng < 0 ? 360 : 0;
-            // distance
-            let R = 6371000; // meters
-            let deltaF = (p2.lat - p1.lat) * toRadian;
-            let deltaL = (p2.lng - p1.lng) * toRadian;
-            let a = Math.sin(deltaF / 2) * Math.sin(deltaF / 2) + Math.cos(p1.lat * toRadian) * Math.cos(p2.lat * toRadian) * Math.sin(deltaL / 2) * Math.sin(deltaL / 2);
-            let c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-            let distance = R * c;
-            return (distance < 10000 ? distance.toFixed(0) + "m " : (distance / 1000).toFixed(1) + "km ") + brng.toFixed(1) + "°T";
-        },
-
-        contactsNum: function () {
-            let online = 0;
-            let total = 0;
-            this.units.forEach(function (u) {
-                if (u.isContact()) {
-                    if (u.isOnline()) online += 1;
-                    total += 1;
-                }
-            })
-
-            return online + "/" + total;
-        },
-
-        countByCategory: function (s) {
-            let total = 0;
-            this.units.forEach(function (u) {
-                if (u.unit.category === s) total += 1;
-            })
-
-            return total;
-        },
-
-        msgNum: function (all) {
-            if (!this.messages) return 0;
-            let n = 0;
-            for (const [key, value] of Object.entries(this.messages)) {
-                if (value.messages) {
-                    for (m of value.messages) {
-                        if (all || !this.seenMessages.has(m.message_id)) n++;
-                    }
-                }
-            }
-            return n;
-        },
-
-        msgNum1: function (uid, all) {
-            if (!this.messages || !this.messages[uid].messages) return 0;
-            let n = 0;
-            for (m of this.messages[uid].messages) {
-                if (all || !this.seenMessages.has(m.message_id)) n++;
-            }
-            return n;
-        },
-
-        openChat: function (uid, chatroom) {
-            this.chat_uid = uid;
-            this.chatroom = chatroom;
-            new bootstrap.Modal(document.getElementById('messages')).show();
-
-            if (this.messages[this.chat_uid]) {
-                for (m of this.messages[this.chat_uid].messages) {
-                    this.seenMessages.add(m.message_id);
-                }
-            }
-        },
-
-        getStatus: function (uid) {
-            return this.ts && this.units.get(uid)?.unit?.status;
-        },
-
-        getMessages: function () {
-            if (!this.chat_uid) {
-                return [];
-            }
-
-            let msgs = this.messages[this.chat_uid] ? this.messages[this.chat_uid].messages : [];
-
-            if (document.getElementById('messages').style.display !== 'none') {
-                for (m of msgs) {
-                    this.seenMessages.add(m.message_id);
-                }
-            }
-
-            return msgs;
-        },
-
-        getUnitName: function (u) {
-            let res = u?.unit?.callsign || "no name";
-            if (this.config && u.unit.parent_uid === this.config.uid) {
-                if (u.unit.send === true) {
-                    res = "+ " + res;
-                } else {
-                    res = "* " + res;
-                }
-            }
-            return res;
-        },
-
-        cancelEditForm: function () {
-            this.formFromUnit(this.getCurrentUnit());
-        },
-
-        sidcFromType: function (s) {
-            if (!s || !s.startsWith('a-')) return "";
-
-            let n = s.split('-');
-
-            let sidc = 'S' + n[1];
-
-            if (n.length > 2) {
-                sidc += n[2] + 'P';
-            } else {
-                sidc += '-P';
-            }
-
-            if (n.length > 3) {
-                for (let i = 3; i < n.length; i++) {
-                    if (n[i].length > 1) {
-                        break
-                    }
-                    sidc += n[i];
-                }
-            }
-
-            if (sidc.length < 10) {
-                sidc += '-'.repeat(10 - sidc.length);
-            }
-
-            return sidc.toUpperCase();
-        },
-
-        deleteCurrentUnit: function () {
-            if (!this.current_unit_uid) return;
-            fetch("unit/" + this.current_unit_uid, {method: "DELETE"});
-        },
-
-        sendMessage: function () {
-            let msg = {
-                from: this.config.callsign,
-                from_uid: this.config.uid,
-                chatroom: this.chatroom,
-                to_uid: this.chat_uid,
-                text: this.chat_msg,
-            };
-            this.chat_msg = "";
-
-            const requestOptions = {
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify(msg)
-            };
-            let vm = this;
-            fetch("/message", requestOptions)
-                .then(resp => resp.json())
-                .then(d => vm.messages = d);
-
-        }
-    },
+// replaces Vue's data object
+let map = null;
+let layers = null;
+let conn = null;
+let status = "";
+let units = new Map();
+let messages = [];
+let seenMessages = new Set();
+let ts = 0;
+let locked_unit_uid = '';
+let current_unit_uid = null;
+let config = null;
+let tools = new Map();
+let me = null;
+let coords = null;
+let point_num = 1;
+let coord_format = "d";
+let form_unit = {};
+let types = null;
+let chatroom = "";
+let chat_uid = "";
+let chat_msg = "";
+
+let appState = {
+    messages: [],
+    seenMessages: new Set(),
+    status: '',
+    map: null,
+    units: new Map(),
+    locked_unit_uid: '',
+    ts: 0,
+    current_unit_uid: '',
+};
+
+function fetchMessages() {
+    fetch('/message')
+        .then(response => response.json())
+        .then(data => {
+            appState.messages = data;
+            updateMessagesUI();
+            console.log('Messages updated:', appState.messages);
+        })
+        .catch(error => {
+            console.error('Failed to fetch messages:', error);
+            showError('Failed to load messages.');
+        });
+}
+
+
+// Function to update the messages UI based on the latest state
+function updateMessagesUI() {
+    const messagesContainer = document.getElementById('messages-container');
+    messagesContainer.innerHTML = ''; // Clear current messages
+    appState.messages.forEach(msg => {
+        const messageElement = document.createElement('div');
+        messageElement.textContent = msg.text; // Simplified, add more structure as needed
+        messagesContainer.appendChild(messageElement);
+    });
+}
+
+// Function to show error messages in the UI
+function showError(message) {
+    const errorContainer = document.getElementById('error-container');
+    errorContainer.textContent = message;
+    errorContainer.style.display = 'block'; // Make sure this is visible
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    fetchMessages(); // Fetch messages when the document is ready
 });
+
+function initializeMap() {
+    map = L.map('map').setView([60, 30], 11);
+    L.control.scale({metric: true}).addTo(map);
+}
+
+function initializeLayers() {
+    layers = L.control.layers({}, null, {hideSingleBase: true}).addTo(map);
+    // Dynamically add layers based on some configuration or predefined settings
+}
+
+function setupWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+    conn = new WebSocket(protocol + window.location.host + '/ws');
+    conn.onmessage = (e) => processWebSocketMessage(JSON.parse(e.data));
+    conn.onopen = () => { console.log("Connected"); status = "connected"; };
+    conn.onerror = () => { console.log("WebSocket Error"); status = "error"; };
+    conn.onclose = () => { console.log("WebSocket Closed"); status = ""; setTimeout(setupWebSocket, 3000); };
+}
+
+function processWebSocketMessage(data) {
+    // Handle the data received via websockets
+    console.log("WebSocket Data:", data);
+}
+
+function handleEvents() {
+    map.on('click', mapClick);
+    map.on('mousemove', function (e) { coords = e.latlng; });
+}
+
+function mapClick(e) {
+    if (modeIs("redx")) {
+        addOrMove("redx", e.latlng, "/static/icons/x.png");
+    }
+    // Additional click handlers based on other modes
+}
+
+function modeIs(mode) {
+    return document.getElementById(mode).checked;
+}
+
+function addOrMove(name, coord, icon) {
+    let marker = tools.get(name);
+    if (marker) {
+        marker.setLatLng(coord);
+    } else {
+        marker = L.marker(coord, {icon: L.icon({iconUrl: icon, iconSize: [20, 20], iconAnchor: [10, 10]})}).addTo(map);
+        tools.set(name, marker);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Initialize the map
+    appState.map = L.map('map').setView([60, 30], 11);
+    L.control.scale({ metric: true }).addTo(appState.map);
+
+    // Configure and connect
+    getConfig();
+    if ('WebSocket' in window || 'MozWebSocket' in window) {
+        connect();
+    }
+
+    // Data refreshing
+    renew(); // Initial renew
+    setInterval(renew, 5000); // Regular updates
+    setInterval(sender, 1000); // Send data at regular intervals
+
+    // Event handlers for map interactions
+    appState.map.on('click', mapClick);
+    appState.map.on('mousemove', mouseMove);
+
+    // Initial form setup (if applicable)
+    formFromUnit(null);
+});
+
+// Definitions of getConfig, connect, renew, sender, mapClick, mouseMove, formFromUnit
+function getConfig() {
+    fetch('/config')
+        .then(response => response.json())
+        .then(data => {
+            appState.config = data;  // Assume `appState` is your global state object
+
+            // Update map view
+            appState.map.setView([data.lat, data.lon], data.zoom);
+
+            // Set up marker for 'me' if callsign is present
+            if (data.callsign) {
+                appState.me = L.marker([data.lat, data.lon], {
+                    icon: L.icon({
+                        iconUrl: "/static/icons/self.png",
+                        iconAnchor: new L.Point(16, 16)
+                    })
+                }).addTo(appState.map);
+                
+                // Fetch additional types data
+                fetch('/types')
+                    .then(resp => resp.json())
+                    .then(typesData => {
+                        appState.types = typesData;
+                    });
+            }
+
+            // Set up map layers
+            let layersControl = L.control.layers({}, null, {hideSingleBase: true}).addTo(appState.map);
+            let firstLayerAdded = false;
+            data.layers.forEach(layer => {
+                let options = {
+                    minZoom: layer.minZoom || 1,
+                    maxZoom: layer.maxZoom || 20,
+                    subdomains: layer.parts || []
+                };
+
+                let tileLayer = L.tileLayer(layer.url, options);
+                layersControl.addBaseLayer(tileLayer, layer.name);
+
+                if (!firstLayerAdded) {
+                    tileLayer.addTo(appState.map);
+                    firstLayerAdded = true;
+                }
+            });
+        })
+        .catch(error => console.error('Error loading configuration:', error));
+}
+
+
+function connect() {
+    let protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+    let url = protocol + window.location.host + '/ws';
+
+    // Assuming `appState` is your global state object
+    fetchAllUnits();
+    fetchMessages();
+
+    appState.conn = new WebSocket(url);
+
+    appState.conn.onmessage = function(event) {
+        processWS(JSON.parse(event.data));
+    };
+
+    appState.conn.onopen = function(event) {
+        console.log("connected");
+        appState.status = "connected";  // Update status in global state
+        updateStatusDisplay();  // Assume you have a function to update the UI with the current status
+    };
+
+    appState.conn.onerror = function(event) {
+        console.error("WebSocket error observed:", event);
+        appState.status = "error";
+        updateStatusDisplay();
+    };
+
+    appState.conn.onclose = function(event) {
+        console.log("WebSocket closed");
+        appState.status = "";
+        updateStatusDisplay();
+        setTimeout(connect, 3000);  // Attempt to reconnect
+    };
+}
+
+function fetchAllUnits() {
+    fetch('/unit')
+        .then(response => response.json())
+        .then(data => processUnits(data))
+        .catch(error => console.error('Failed to fetch units:', error));
+}
+
+function processUnits(data) {
+    // This function would process and update units as needed
+    console.log('Processing units:', data);
+    // Here you should implement what you want to do with the units data
+}
+
+function fetchMessages() {
+    fetch('/message')
+        .then(response => response.json())
+        .then(data => {
+            messages = data;  // Assuming 'messages' is a globally or appropriately scoped variable
+            console.log('Messages updated:', messages);
+        })
+        .catch(error => console.error('Failed to fetch messages:', error));
+}
+
+
+function renew() {
+    if (!conn) {
+        fetchAllUnits();
+        fetchMessages();
+    }
+}
+
+
+// Make sure to define or import fetchAllUnits and fetchMessages functions as well.
+
+
+// Assuming getTool and requestOptions are properly defined or imported.
+
+function sender() {
+    const dp1Tool = getTool("dp1");
+    if (dp1Tool) {
+        let p = dp1Tool.getLatLng();
+
+        const requestOptions = {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({lat: p.lat, lon: p.lng, name: "DP1"})
+        };
+        fetch("/dp", requestOptions);
+    }
+}
+
+function getTool(name) {
+    if (!appState.tools.has(name)) {
+        console.error(`Tool ${name} not found in appState.tools`);
+        return null; // or handle the case when the tool is missing
+    }
+    return appState.tools.get(name);
+}
+
+
+// Dummy setup, assuming L.marker returns an object with a getLatLng method
+tools.set("dp1", {
+    getLatLng: () => ({lat: 34.0522, lon: -118.2437})
+});
+
+// Assuming you have defined the `Unit` class elsewhere in your script
+// and 'appState' is accessible in this context as a global or otherwise imported variable
+
+function processUnits(data) {
+    let keys = new Set();
+
+    data.forEach(u => {
+        let processedUnit = processUnit(u);
+        if (processedUnit) {
+            keys.add(processedUnit.uid);
+        }
+    });
+
+    appState.units.forEach((value, key) => {
+        if (!keys.has(key)) {
+            removeUnit(key);
+        }
+    });
+
+    appState.ts += 1;
+}
+
+function processUnit(u) {
+    if (!u) return;
+    let unit = appState.units.get(u.uid);
+
+    if (!unit) {
+        unit = new Unit(appState.map, u);
+        appState.units.set(u.uid, unit);
+    } else {
+        unit.update(appState.map, u);
+    }
+
+    if (appState.locked_unit_uid === unit.uid) {
+        appState.map.setView(unit.coords());
+    }
+
+    return unit;
+}
+
+function removeUnit(uid) {
+    let unit = appState.units.get(uid);
+    if (unit) {
+        unit.removeMarker(appState.map);
+        appState.units.delete(uid);
+    }
+}
+
+function processWS(u) {
+    if (u.type === "unit") {
+        processUnit(u.unit);
+    } else if (u.type === "delete") {
+        removeUnit(u.uid);
+    } else if (u.type === "chat") {
+        fetchMessages();
+    }
+}
+
+function removeUnit(uid) {
+    if (!appState.units.has(uid)) return;
+
+    let item = appState.units.get(uid);
+    if (item && item.marker) {
+        item.removeMarker(appState.map); // Assuming `removeMarker` is a method of `item` that handles the marker removal.
+    }
+    appState.units.delete(uid);
+
+    if (appState.current_unit_uid === uid) {
+        setCurrentUnitUid(null, false);
+    }
+}
+
+// Additional functions that might be called from above
+function processUnit(unitData) {
+    let unit = appState.units.get(unitData.uid);
+    if (!unit) {
+        unit = new Unit(appState.map, unitData); // Assuming `Unit` is a constructor you have defined
+        appState.units.set(unitData.uid, unit);
+    } else {
+        unit.update(appState.map, unitData); // Assuming `update` is a method of `Unit`
+    }
+
+    if (appState.locked_unit_uid === unit.uid) {
+        appState.map.setView(unit.coords()); // Adjust the map view if necessary
+    }
+}
+
+function setCurrentUnitUid(uid, follow) {
+    if (uid && appState.units.has(uid)) {
+        appState.current_unit_uid = uid;
+        let unit = appState.units.get(uid);
+        if (follow) {
+            mapToUnit(unit);
+        }
+        formFromUnit(unit);
+    } else {
+        appState.current_unit_uid = null;
+        formFromUnit(null);
+    }
+}
+
+function getCurrentUnit() {
+    if (!appState.current_unit_uid || !appState.units.has(appState.current_unit_uid)) return null;
+    return appState.units.get(appState.current_unit_uid);
+}
+
+// Assuming mapToUnit and formFromUnit functions are defined elsewhere in your script
+
+function mapToUnit(unit) {
+    if (unit && unit.hasCoords()) {  // Assuming `hasCoords` is a method of `unit`
+        appState.map.setView(unit.coords());  // Assuming `coords` is a method that returns [lat, lon]
+    }
+}
+
+function formFromUnit(unit) {
+    if (unit) {
+        // Populate form or perform actions with unit data
+        console.log("Form populated with unit:", unit);
+    } else {
+        // Reset or clear form
+        console.log("Form reset to default state.");
+    }
+}
+
+function byCategory(category) {
+    let arr = Array.from(appState.units.values()).filter(u => u.unit.category === category);
+    arr.sort((a, b) => a.compare(b));
+    return appState.ts && arr;  // Assuming ts is some timestamp or change tracking variable
+}
+
+function mapToUnit(unit) {
+    if (unit && unit.hasCoords()) {
+        appState.map.setView(unit.coords());
+    }
+}
+
+function getImg(item, size) {
+    return getIconUri(item, size, false).uri;  // Assuming getIconUri is defined elsewhere
+}
+
+function milImg(item) {
+    return getMilIconUri(item, 24, false).uri;  // Assuming getMilIconUri is defined elsewhere
+}
+
+function dt(str) {
+    let d = new Date(Date.parse(str));
+    return `${d.getDate().toString().padStart(2, '0')}-${(d.getMonth() + 1).toString().padStart(2, '0')}-${d.getFullYear()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+}
+
+function sp(v) {
+    return (v * 3.6).toFixed(1);
+}
+
+function modeIs(s) {
+    return document.getElementById(s).checked;
+}
+
+function mouseMove(e) {
+    appState.coords = e.latlng;  // Assuming coords is a property on the appState for tracking mouse movements
+}
+
+// Example definitions for undefined functions and state management
+function getIconUri(item, size, status) {
+    // Placeholder function, implement based on actual logic
+    return { uri: `/path/to/icon/${item.type}/${size}/${status ? 'active' : 'inactive'}.png` };
+}
+
+function mapClick(e) {
+    if (modeIs("redx")) {
+        addOrMove("redx", e.latlng, "/static/icons/x.png");
+        return;
+    }
+    if (modeIs("dp1")) {
+        addOrMove("dp1", e.latlng, "/static/icons/spoi_icon.png");
+        return;
+    }
+    if (modeIs("point")) {
+        let uid = uuidv4(); // Ensure uuidv4() is defined or included from a library
+        let now = new Date();
+        let stale = new Date(now);
+        stale.setDate(stale.getDate() + 365);
+        let u = {
+            uid: uid,
+            category: "point",
+            callsign: "point-" + (++appState.point_num), // Ensure appState.point_num is initialized properly
+            sidc: "",
+            start_time: now,
+            last_seen: now,
+            stale_time: stale,
+            type: "b-m-p-s-m",
+            lat: e.latlng.lat,
+            lon: e.latlng.lng,
+            hae: 0,
+            speed: 0,
+            course: 0,
+            status: "",
+            text: "",
+            parent_uid: "",
+            parent_callsign: "",
+            color: "#ff0000",
+            local: true,
+            send: false,
+        };
+        if (appState.config && appState.config.uid) {
+            u.parent_uid = appState.config.uid;
+            u.parent_callsign = appState.config.callsign;
+        }
+
+        let unit = new Unit(null, u); // Ensure Unit class is defined
+        unit.send();
+
+        setCurrentUnitUid(u.uid, true);
+    }
+    if (modeIs("me")) {
+        appState.config.lat = e.latlng.lat;
+        appState.config.lon = e.latlng.lng;
+        appState.me.setLatLng(e.latlng);
+        const requestOptions = {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({lat: e.latlng.lat, lon: e.latlng.lng})
+        };
+        fetch("/pos", requestOptions);
+    }
+}
+
+function modeIs(mode) {
+    return document.getElementById(mode).checked;
+}
+
+function addOrMove(name, coord, iconUrl) {
+    let tool = appState.tools.get(name);
+    if (tool) {
+        tool.setLatLng(coord);
+    } else {
+        tool = L.marker(coord, { icon: L.icon({ iconUrl: iconUrl, iconSize: [20, 20], iconAnchor: [10, 10] }) });
+        appState.tools.set(name, tool);
+        tool.addTo(appState.map);
+    }
+}
+
+function setCurrentUnitUid(uid, follow) {
+    if (uid && appState.units.has(uid)) {
+        appState.current_unit_uid = uid;
+        let unit = appState.units.get(uid);
+        if (follow) {
+            appState.map.setView(unit.coords());
+        }
+        formFromUnit(unit);
+    } else {
+        appState.current_unit_uid = null;
+        formFromUnit(null);
+    }
+}
+
+function formFromUnit(u) {
+    let formUnit = {};
+
+    if (!u) {
+        formUnit = {
+            callsign: "",
+            category: "",
+            type: "",
+            subtype: "",
+            aff: "",
+            text: "",
+            send: false,
+            root_sidc: null,
+        };
+    } else {
+        formUnit = {
+            callsign: u.unit.callsign,
+            category: u.unit.category,
+            type: u.unit.type,
+            subtype: "G",
+            aff: "h",
+            text: u.unit.text,
+            send: u.unit.send,
+            root_sidc: appState.types,  // Assuming 'appState.types' stores your types data
+        };
+
+        if (u.unit.type.startsWith('a-')) {
+            formUnit.type = 'b-m-p-s-m';
+            formUnit.aff = u.unit.type.substring(2, 3);
+            formUnit.subtype = u.unit.type.substring(4);
+            formUnit.root_sidc = getRootSidc(u.unit.type.substring(4));  // Ensure this function is implemented
+        }
+    }
+
+    // Update the form inputs on the webpage
+    updateFormFields(formUnit);
+}
+
+function getRootSidc(type) {
+    let current = appState.types;  // Starting point for the type lookup
+    while (current && current.next) {
+        for (let child of current.next) {
+            if (type.startsWith(child.code)) {
+                return child;
+            }
+        }
+        current = null;  // If no match is found, break out of the loop
+    }
+    return null;  // Return null if no matching root SIDC is found
+}
+
+function updateFormFields(formUnit) {
+    document.getElementById('callsign').value = formUnit.callsign;
+    document.getElementById('category').value = formUnit.category;
+    document.getElementById('type').value = formUnit.type;
+    document.getElementById('subtype').value = formUnit.subtype;
+    document.getElementById('aff').value = formUnit.aff;
+    document.getElementById('text').value = formUnit.text;
+    document.getElementById('send').checked = formUnit.send;
+
+    // Optionally update other UI components if they depend on `root_sidc`
+    if (formUnit.root_sidc) {
+        updateSidcDropdown(formUnit.root_sidc);
+    }
+}
+
+function updateSidcDropdown(rootSidc) {
+    const selectElement = document.getElementById('sidcSelect');
+    selectElement.innerHTML = '';  // Clear current options
+    if (rootSidc && rootSidc.next) {
+        rootSidc.next.forEach(option => {
+            const optElement = document.createElement('option');
+            optElement.value = option.code;
+            optElement.text = option.name;
+            selectElement.appendChild(optElement);
+        });
+    }
+}
+
+function saveEditForm() {
+    let u = getCurrentUnit();
+    if (!u) return;
+
+    // Get values directly from the form elements
+    u.unit.callsign = document.getElementById('callsign').value;
+    u.unit.category = document.getElementById('category').value;
+    u.unit.send = document.getElementById('send').checked;
+    u.unit.text = document.getElementById('text').value;
+
+    if (u.unit.category === "unit") {
+        u.unit.type = ["a", document.getElementById('aff').value, document.getElementById('subtype').value].join('-');
+        u.unit.sidc = sidcFromType(u.unit.type);
+    } else {
+        u.unit.type = document.getElementById('type').value;
+        u.unit.sidc = "";
+    }
+
+    u.redraw = true;
+    u.updateMarker(map); // Ensure `map` is accessible
+    u.send();
+}
+
+function getRootSidc(s) {
+    let current = appState.types; // Assuming `appState.types` stores your types data
+
+    while (current) {
+        if (!current.next) {
+            return null;
+        }
+
+        let found = false;
+        for (const k of current.next) {
+            if (s.startsWith(k.code)) {
+                current = k;
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            break; // If no further nesting matches, break the loop
+        }
+    }
+
+    return current;
+}
+
+function getCurrentUnit() {
+    // This function should return the currently edited unit by its UID
+    // Assume `appState.units` is a Map where unit data is stored
+    return appState.units.get(appState.current_unit_uid) || null;
+}
+
+function sidcFromType(type) {
+    // This function maps a unit type to a standardized SIDC (symbol identification code)
+    // Example implementation assuming a simple mapping based on types
+    let mappings = {
+        'a-h-G': 'SHP', // Sample mapping: unit type 'a-h-G' maps to SIDC 'SHP'
+        // Add more mappings as required
+    };
+    return mappings[type] || '';
+}
+
+
+document.addEventListener('DOMContentLoaded', function() {
+    appState.map.on('click', mapClick);
+    formFromUnit(null);
+    document.getElementById('saveForm').addEventListener('click', saveEditForm);
+
+});
+
+
+// Attach events
+document.addEventListener('DOMContentLoaded', () => {
+    appState.map.on('mousemove', mouseMove);
+});
+
+function getSidc(s) {
+    let current = appState.types; // Assume appState.types holds your types data
+
+    if (s === "") {
+        return current;
+    }
+
+    while (current) {
+        if (!current.next) {
+            return null;
+        }
+
+        for (const k of current.next) {
+            if (k.code === s) {
+                return k;
+            }
+            if (s.startsWith(k.code)) {
+                current = k;
+                break;
+            }
+        }
+    }
+}
+
+function removeTool(name) {
+    if (appState.tools.has(name)) {
+        let tool = appState.tools.get(name);
+        map.removeLayer(tool); // Assuming `map` is the Leaflet map instance
+        tool.remove();
+        appState.tools.delete(name);
+        appState.ts++; // Assuming ts is a timestamp or similar incremental counter
+    }
+}
+
+// Define the updateStatusDisplay function
+function updateStatusDisplay(statusMessage) {
+    const statusElement = document.getElementById('statusDisplay');
+    if (statusElement) {
+        statusElement.textContent = statusMessage;
+    } else {
+        console.warn("Status display element not found.");
+    }
+}
+
+
+function mouseMove(event) {
+    // Update some UI elements or state when the mouse moves over the map
+}
+
+function formFromUnit(unit) {
+    // Initialize or reset a form based on a unit's data or lack thereof
+}
+
+function getCurrentUnit() {
+    if (appState.current_unit_uid) {
+        return getCurrentUnitById(appState.current_unit_uid);
+    }
+    return null;
+}
+
+function getCurrentUnitById(uid) {
+    // Assuming `appState.units` is a Map or similar structure holding unit data
+    return appState.units.get(uid) || null;
+}
 
 
