@@ -1,44 +1,53 @@
+// Class definition for Unit which manages unit markers on a map
 class Unit {
     constructor(map, u) {
         this.unit = u;
         this.uid = u.uid;
-
+        // Update the marker on the map if the map is provided
         if (map) this.updateMarker(map);
     }
 
+    // Updates the unit data and marker on the map
     update(map, u) {
         if (this.unit.uid !== u.uid) {
-            throw "wrong uid";
+            throw "wrong uid"; // Ensure the update is for the correct unit
         }
 
-        this.redraw = this.needsRedraw(u);
+        this.redraw = this.needsRedraw(u); // Check if redraw is needed
 
+        // Update unit properties
         for (const k of Object.keys(u)) {
             this.unit[k] = u[k];
         }
 
-        this.updateMarker(map);
+        this.updateMarker(map); // Update the marker with new data
 
         return this;
     }
 
+    // Determines if the marker needs to be redrawn
     needsRedraw(u) {
-        if (this.unit.type !== u.type || this.unit.sidc !== u.sidc || this.unit.status !== u.status) return true;
-        if (this.unit.speed !== u.speed || this.unit.direction !== u.direction) return true;
-        if (this.unit.team !== u.team || this.unit.role !== u.role) return true;
-
-        if (this.unit.sidc.charAt(2) === 'A' && this.unit.hae !== u.hae) return true;
-        return false;
+        return this.unit.type !== u.type || 
+               this.unit.sidc !== u.sidc || 
+               this.unit.status !== u.status ||
+               this.unit.speed !== u.speed || 
+               this.unit.direction !== u.direction ||
+               this.unit.team !== u.team || 
+               this.unit.role !== u.role ||
+               (this.unit.sidc.charAt(2) === 'A' && this.unit.hae !== u.hae);
     }
 
+    // Check if the unit is a contact type
     isContact() {
         return this.unit.category === "contact"
     }
 
+    // Check if the unit is currently online
     isOnline() {
         return this.unit.status === "Online";
     }
 
+    // Remove the unit marker from the map
     removeMarker(map) {
         if (this.marker) {
             map.removeLayer(this.marker);
@@ -47,6 +56,7 @@ class Unit {
         }
     }
 
+    // Updates or creates a new marker on the map for the unit
     updateMarker(map) {
         if (!this.hasCoords()) {
             this.removeMarker(map);
@@ -68,8 +78,8 @@ class Unit {
 
             if (this.local) {
                 this.marker.on('dragend', function (e) {
-                    vm.unit.lat = marker.getLatLng().lat;
-                    vm.unit.lon = marker.getLatLng().lng;
+                    vm.unit.lat = e.target.getLatLng().lat;
+                    vm.unit.lon = e.target.getLatLng().lng;
                 });
             }
 
@@ -81,33 +91,39 @@ class Unit {
         this.redraw = false;
     }
 
+    // Check if the unit has valid coordinates
     hasCoords() {
         return this.unit.lat && this.unit.lon;
     }
 
+    // Returns the coordinates of the unit
     coords() {
         return [this.unit.lat, this.unit.lon];
     }
 
+    // Returns the LatLng object for the unit's location
     latlng() {
         return L.latLng(this.unit.lat, this.unit.lon)
     }
 
+    // Compares this unit's callsign with another unit's callsign
     compare(u2) {
         return this.unit.callsign.toLowerCase().localeCompare(u2.unit.callsign.toLowerCase());
     }
 
+    // Generates the popup content for the unit's marker
     popup() {
-        let v = '<b>' + this.unit.callsign + '</b><br/>';
-        if (this.unit.team) v += this.unit.team + ' ' + this.unit.role + '<br/>';
-        if (this.unit.speed) v += 'Speed: ' + this.unit.speed.toFixed(0) + ' m/s<br/>';
+        let v = `<b>${this.unit.callsign}</b><br/>`;
+        if (this.unit.team) v += `${this.unit.team} ${this.unit.role}<br/>`;
+        if (this.unit.speed) v += `Speed: ${this.unit.speed.toFixed(0)} m/s<br/>`;
         if (this.unit.sidc.charAt(2) === 'A') {
-            v += "hae: " + this.unit.hae.toFixed(0) + " m<br/>";
+            v += `hae: ${this.unit.hae.toFixed(0)} m<br/>`;
         }
         v += this.unit.text.replaceAll('\n', '<br/>').replaceAll('; ', '<br/>');
         return v;
     }
 
+    // Sends updated unit data to the server
     send() {
         const requestOptions = {
             method: "POST",
@@ -120,9 +136,7 @@ class Unit {
     }
 }
 
-
-
-// replaces Vue's data object
+// Global objects and state
 let map = null;
 let layers = null;
 let conn = null;
@@ -145,140 +159,101 @@ let chatroom = "";
 let chat_uid = "";
 let chat_msg = "";
 
-let appState = {
-    messages: [],
-    seenMessages: new Set(),
-    status: '',
-    map: null,
-    units: new Map(),
-    locked_unit_uid: '',
-    ts: 0,
-    current_unit_uid: '',
-}
-
-function connect() {
-    let protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
-    let url = protocol + window.location.host + '/ws';
-
-    // Assuming `appState` is your global state object
-    fetchAllUnits();
-    fetchMessages();
-
-    appState.conn = new WebSocket(url);
-
-    appState.conn.onmessage = function(event) {
-        processWS(JSON.parse(event.data));
-    };
-
-    appState.conn.onopen = function(event) {
-        console.log("connected");
-        appState.status = "connected";  // Update status in global state
-        updateStatusDisplay();  // Assume you have a function to update the UI with the current status
-    };
-
-    appState.conn.onerror = function(event) {
-        console.error("WebSocket error observed:", event);
-        appState.status = "error";
-        updateStatusDisplay();
-    };
-
-    appState.conn.onclose = function(event) {
-        console.log("WebSocket closed");
-        appState.status = "";
-        updateStatusDisplay();
-        setTimeout(connect, 3000);  // Attempt to reconnect
-    };
-}
-
-function fetchAllUnits() {
-    fetch('/unit')
+// Fetches and updates messages from the server
+function fetchMessages() {
+    fetch('/message')
         .then(response => response.json())
-        .then(data => processUnits(data))
-        .catch(error => console.error('Failed to fetch units:', error));
+        .then(data => {
+            messages = data;
+            updateMessagesUI();
+            console.log('Messages updated:', messages);
+        })
+        .catch(error => {
+            console.error('Failed to fetch messages:', error);
+            showError('Failed to load messages.');
+        });
 }
 
-function processUnits(data, context) {
-    // Create a set to store unique unit IDs
-    let keys = new Set();
-
-    // Process each unit in the input data
-    for (let unitData of data) {
-        let processedUnit = processUnit(unitData, context);
-        if (processedUnit) {
-            keys.add(processedUnit.uid);
-        }
-    }
-
-    // Remove units that are no longer in the input data
-    for (const existingKey of context.units.keys()) {
-        if (!keys.has(existingKey)) {
-            context.removeUnit(existingKey);
-        }
-    }
-
-    // Increment the timestamp or internal counter
-    context.ts += 1;
+// Updates the UI to display messages
+function updateMessagesUI() {
+    const messagesContainer = document.getElementById('messages-container');
+    messagesContainer.innerHTML = '';
+    messages.forEach(msg => {
+        const messageElement = document.createElement('div');
+        messageElement.textContent = msg.text;
+        messagesContainer.appendChild(messageElement);
+    });
 }
 
-function processUnit(unitData, context) {
-    if (!unitData) return; // Exit if no data provided
-
-    // Check if the unit already exists
-    let unit = context.units.get(unitData.uid);
-
-    if (!unit) {
-        // If the unit doesn't exist, create a new one and store it
-        unit = new Unit(context.map, unitData);
-        context.units.set(unitData.uid, unit);
-    } else {
-        // If the unit exists, update it
-        unit.update(context.map, unitData);
-    }
-
-    // If this unit is the one currently locked, adjust the map view
-    if (context.locked_unit_uid === unit.uid) {
-        context.map.setView(unit.coords());
-    }
-
-    return unit; // Return the processed or updated unit
+// Displays error messages in the UI
+function showError(message) {
+    const errorContainer = document.getElementById('error-container');
+    errorContainer.textContent = message;
+    errorContainer.style.display = 'block';
 }
 
-function processWS(message, context) {
-    // Handle WebSocket message types
-    if (message.type === "unit") {
-        // Process a single unit update
-        processUnit(message.unit, context);
-    } else if (message.type === "delete") {
-        // Remove a unit by its UID
-        context.removeUnit(message.uid);
-    } else if (message.type === "chat") {
-        // Fetch new chat messages
-        context.fetchMessages();
-    }
-}
+// Initializes the map on document load
+document.addEventListener('DOMContentLoaded', function() {
+    initializeMap();
+    getConfig();
+    setupWebSocket();
+});
 
-
-//sets up the websocket connection 
-function setupWebSocket() {
-    const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
-    conn = new WebSocket(protocol + window.location.host + '/ws');
-    conn.onmessage = (e) => processWebSocketMessage(JSON.parse(e.data));
-    conn.onopen = () => { console.log("Connected"); status = "connected"; };
-    conn.onerror = () => { console.log("WebSocket Error"); status = "error"; };
-    conn.onclose = () => { console.log("WebSocket Closed"); status = ""; setTimeout(setupWebSocket, 3000); };
-}
-
-function processWebSocketMessage(data) {
-    // Handle the data received via websockets
-    console.log("WebSocket Data:", data);
-}
-
+// Initializes and configures the map
 function initializeMap() {
     map = L.map('map').setView([60, 30], 11);
     L.control.scale({metric: true}).addTo(map);
 }
 
+// Fetches configuration data and applies it
+function getConfig() {
+    fetch('/config')
+        .then(response => response.json())
+        .then(data => {
+            config = data;
+            map.setView([config.lat, config.lon], config.zoom);
+            initializeLayers();
+        })
+        .catch(error => console.error('Error loading configuration:', error));
+}
+
+// Initializes and adds layer controls to the map
 function initializeLayers() {
     layers = L.control.layers({}, null, {hideSingleBase: true}).addTo(map);
-    // Dynamically add layers based on some configuration or predefined settings
+}
+
+// Sets up a WebSocket connection for real-time data
+function setupWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+    conn = new WebSocket(protocol + window.location.host + '/ws');
+    conn.onmessage = (e) => console.log("WebSocket Data:", JSON.parse(e.data));
+    conn.onopen = () => console.log("Connected");
+    conn.onerror = () => console.log("WebSocket Error");
+    conn.onclose = () => {
+        console.log("WebSocket Closed");
+        setTimeout(setupWebSocket, 3000);
+    };
+}
+
+// Handles click events on the map
+function mapClick(e) {
+    if (modeIs("redx")) {
+        addOrMove("redx", e.latlng, "/static/icons/x.png");
+    }
+}
+
+// Checks if a specific mode is active
+function modeIs(mode) {
+    return document.getElementById(mode).checked;
+}
+
+// Adds or moves a marker
+function addOrMove(name, coord, icon) {
+    let marker = tools.get(name);
+    if (marker) {
+        marker.setLatLng(coord);
+    } else {
+        marker = L.marker(coord, {icon: L.icon({iconUrl: icon, iconSize: [20, 20], iconAnchor: [10, 10]})}).addTo(map);
+        tools.set(name, marker);
+    }
 }
